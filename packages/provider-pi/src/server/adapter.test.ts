@@ -4767,6 +4767,117 @@ describe("PiAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect("classifies a terminal Pi model error as a usage limit", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread, "default", [], "Hello pi");
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          stopReason: "error",
+          errorMessage: "You've hit your usage limit. Try again in ~15 min.",
+        },
+      });
+      yield* fake.emit({ type: "agent_settled" });
+      const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
+      if (
+        terminal.type !== "turn.terminal" ||
+        terminal.status !== "failed" ||
+        terminal.failure === null
+      ) {
+        assert.fail("expected a failed usage-limit turn");
+        return;
+      }
+      assert.equal(terminal.failure.class, "usage_limit");
+      const resetAt = terminal.failure.resetAt;
+      assert.isTrue(typeof resetAt === "string" && Number.isFinite(Date.parse(resetAt)));
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("keeps a Pi retry in progress and classifies the exhausted limit", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({
+        type: "auto_retry_start",
+        attempt: 1,
+        maxAttempts: 3,
+        delayMs: 1_000,
+        errorMessage: "You've hit your usage limit. Try again in ~15 min.",
+      });
+      const retry = yield* takeEvent(
+        (event) => event.type === "turn_item.updated" && event.turnItem.type === "error",
+      );
+      assert.isTrue(
+        retry.type === "turn_item.updated" &&
+          retry.turnItem.type === "error" &&
+          retry.turnItem.failure.class === "provider_error",
+      );
+      yield* fake.emit({
+        type: "auto_retry_end",
+        success: false,
+        attempt: 3,
+        finalError: "You've hit your usage limit. Try again in ~15 min.",
+      });
+      yield* fake.emit({ type: "agent_settled" });
+      const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
+      if (
+        terminal.type !== "turn.terminal" ||
+        terminal.status !== "failed" ||
+        terminal.failure === null
+      ) {
+        assert.fail("expected a failed usage-limit turn");
+        return;
+      }
+      assert.equal(terminal.failure.class, "usage_limit");
+      const resetAt = terminal.failure.resetAt;
+      assert.isTrue(typeof resetAt === "string" && Number.isFinite(Date.parse(resetAt)));
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("classifies a rejected compact that reports a usage limit", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread, "default", [], "/compact");
+      yield* fake.takeRequest("compact");
+      yield* fake.emit({
+        type: "response",
+        command: "compact",
+        success: false,
+        error: "Claude API rate limit reached. Try again later.",
+      });
+      const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
+      assert.isTrue(
+        terminal.type === "turn.terminal" &&
+          terminal.status === "failed" &&
+          terminal.failure.class === "usage_limit" &&
+          terminal.failure.resetAt === undefined,
+      );
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect("restarts Pi when Stop interrupts a user compact", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;

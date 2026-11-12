@@ -62,6 +62,7 @@ import {
   makeProviderFailure,
   makeProviderRetryTurnItem,
 } from "@t3tools/provider-core/server/failure";
+import { failureForPiTerminalMessage } from "./usageLimit.ts";
 import { turnScopedSelectionTransition } from "@t3tools/provider-core/server/selectionTransition";
 import {
   findReportedPiModel,
@@ -2393,10 +2394,11 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               turn.reportedModel = `${reportedProvider}/${reportedModelId}`;
             }
             if (recordString(message, "stopReason") === "error" && turn.failure === null) {
-              turn.failure = makeProviderFailure({
-                message: recordString(message, "errorMessage") ?? "Pi reported a model error.",
-                class: "provider_error",
-              });
+              const now = yield* DateTime.now;
+              turn.failure = failureForPiTerminalMessage(
+                recordString(message, "errorMessage") ?? "Pi reported a model error.",
+                DateTime.toEpochMillis(now),
+              );
             }
             return;
           }
@@ -2530,11 +2532,11 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               turn.failure = null;
               return;
             }
-            const failure = makeProviderFailure({
-              message: recordString(event, "finalError") ?? "Pi auto-retry failed.",
-              class: "provider_error",
-              retryable: false,
-            });
+            const failure = failureForPiTerminalMessage(
+              recordString(event, "finalError") ?? "Pi auto-retry failed.",
+              DateTime.toEpochMillis(emittedAt),
+              { retryable: false },
+            );
             const attempt = Math.max(1, Math.trunc(recordNumber(event, "attempt") ?? 1));
             const current = turn.activeProviderRetry;
             const providerRetry = {
@@ -2621,10 +2623,11 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                 return;
               }
               if (!compactTurn.compactionCancelled) {
-                compactTurn.failure = makeProviderFailure({
-                  message: recordString(event, "error") ?? "Pi compact failed.",
-                  class: "provider_error",
-                });
+                const now = yield* DateTime.now;
+                compactTurn.failure = failureForPiTerminalMessage(
+                  recordString(event, "error") ?? "Pi compact failed.",
+                  DateTime.toEpochMillis(now),
+                );
                 if (state !== null) yield* finalizeTurn(state);
                 return;
               }
@@ -2718,10 +2721,11 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                   ? turn
                   : null;
             if (failedTurn !== null) {
-              const failure = makeProviderFailure({
-                message: recordString(event, "error") ?? "Pi rejected the prompt.",
-                class: "provider_error",
-              });
+              const now = yield* DateTime.now;
+              const failure = failureForPiTerminalMessage(
+                recordString(event, "error") ?? "Pi rejected the prompt.",
+                DateTime.toEpochMillis(now),
+              );
               if (failedTurn.adoptedWake && command === "prompt") {
                 failedTurn.rejectedPromptFailure = failure;
                 failedTurn.settleWhenIdle = true;
