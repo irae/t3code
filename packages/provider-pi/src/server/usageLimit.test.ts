@@ -2,7 +2,12 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 
-import { classifyPiUsageLimit, failureForPiTerminalMessage } from "./usageLimit.ts";
+import {
+  billedDriverForModel,
+  classifyPiUsageLimit,
+  failureForPiTerminalMessage,
+  resetAtFromBilledWindows,
+} from "./usageLimit.ts";
 
 const nowMs = Date.UTC(2026, 10, 12, 18, 0, 0);
 
@@ -144,5 +149,77 @@ describe("failureForPiTerminalMessage", () => {
     assert.equal(failure.class, "provider_error");
     assert.equal(failure.retryable, false);
     assert.isUndefined(failure.resetAt);
+  });
+});
+
+const billedNow = Date.parse("2026-11-18T20:00:00.000Z");
+
+describe("billed usage reset", () => {
+  it.each([
+    ["openai-codex/gpt-6.2-sol", "codex"],
+    ["claude-extra/claude-sonnet-5-5", "claudeAgent"],
+    ["xai/grok-4.7", "grok"],
+  ] as const)("maps %s to %s", (model, driver) => {
+    assert.equal(billedDriverForModel(model), driver);
+  });
+
+  it("ignores a slug with no billed driver", () => {
+    assert.isNull(billedDriverForModel("other/default"));
+    assert.isNull(billedDriverForModel(null));
+  });
+
+  it("uses an exhausted window instead of a later open weekly bar", () => {
+    assert.equal(
+      resetAtFromBilledWindows(
+        [
+          { kind: "session", usedPercent: 100, resetsAt: "2026-11-18T22:00:00.000Z" },
+          { kind: "weekly", usedPercent: 12, resetsAt: "2026-11-25T00:00:00.000Z" },
+        ],
+        billedNow,
+      ),
+      "2026-11-18T22:00:00.000Z",
+    );
+  });
+
+  it("does not use an open session clock when the bars have not caught up", () => {
+    assert.isNull(
+      resetAtFromBilledWindows(
+        [
+          { kind: "session", usedPercent: 40, resetsAt: "2026-11-18T22:00:00.000Z" },
+          { kind: "weekly", usedPercent: 12, resetsAt: "2026-11-25T00:00:00.000Z" },
+        ],
+        billedNow,
+      ),
+    );
+  });
+
+  it("returns nothing when an exhausted window has no clock", () => {
+    assert.isNull(
+      resetAtFromBilledWindows(
+        [
+          { kind: "weekly", usedPercent: 100 },
+          { kind: "session", usedPercent: 100, resetsAt: "2026-11-18T22:00:00.000Z" },
+        ],
+        billedNow,
+      ),
+    );
+  });
+
+  it("ignores a clock that already passed", () => {
+    assert.isNull(
+      resetAtFromBilledWindows(
+        [{ kind: "session", usedPercent: 100, resetsAt: "2026-11-18T19:00:00.000Z" }],
+        billedNow,
+      ),
+    );
+  });
+
+  it("does not guess an open weekly clock", () => {
+    assert.isNull(
+      resetAtFromBilledWindows(
+        [{ kind: "weekly", usedPercent: 12, resetsAt: "2026-11-25T00:00:00.000Z" }],
+        billedNow,
+      ),
+    );
   });
 });
