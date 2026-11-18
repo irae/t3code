@@ -18,6 +18,10 @@
     "./server/usage": {
       "types": "./src/server/usage.ts",
       "import": "./src/server/usage.ts"
+    },
+    "./server/usageLimit": {
+      "types": "./src/server/usageLimit.ts",
+      "import": "./src/server/usageLimit.ts"
     }
   },
   "scripts": {

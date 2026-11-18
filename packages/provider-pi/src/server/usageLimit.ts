@@ -1,5 +1,9 @@
 // @effect-diagnostics globalDate:off -- A provider reset clock is the viewer's local wall time. Effect DateTime parts are UTC.
-import type { OrchestrationV2ProviderFailure } from "@t3tools/contracts";
+import type {
+  OrchestrationV2ProviderFailure,
+  ProviderDriverKind,
+  ServerProviderUsageWindow,
+} from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 
@@ -108,6 +112,39 @@ function hourOn12HourClock(hour: number, ampm: string): number {
   const pm = ampm.toLowerCase() === "pm";
   if (hour === 12) return pm ? 12 : 0;
   return pm ? hour + 12 : hour;
+}
+
+export function billedDriverForModel(model: string | null | undefined): ProviderDriverKind | null {
+  if (!model) return null;
+  const slash = model.indexOf("/");
+  const provider = (slash === -1 ? model : model.slice(0, slash)).toLowerCase();
+  if (provider.includes("claude")) return "claudeAgent" as ProviderDriverKind;
+  if (provider.includes("codex") || provider === "openai") return "codex" as ProviderDriverKind;
+  if (provider.includes("grok") || provider === "xai") return "grok" as ProviderDriverKind;
+  return null;
+}
+
+function futureResetMs(resetsAt: string | undefined, nowMs: number): number | null {
+  if (resetsAt === undefined) return null;
+  const at = Date.parse(resetsAt);
+  return Number.isFinite(at) && at > nowMs ? at : null;
+}
+
+/** Every exhausted window must have reset. A past clock already did. */
+export function resetAtFromBilledWindows(
+  windows: readonly Pick<ServerProviderUsageWindow, "usedPercent" | "resetsAt">[],
+  nowMs: number,
+): string | null {
+  const exhausted = windows.filter((window) => window.usedPercent >= 100);
+  if (exhausted.length === 0 || exhausted.some((window) => window.resetsAt === undefined)) {
+    return null;
+  }
+  const resets = exhausted.flatMap((window) => {
+    const resetsAt = window.resetsAt;
+    return futureResetMs(resetsAt, nowMs) === null || resetsAt === undefined ? [] : [resetsAt];
+  });
+  resets.sort((left, right) => Date.parse(left) - Date.parse(right));
+  return resets.at(-1) ?? null;
 }
 
 function localClock(nowMs: number, hour: number, minute: number): number {
