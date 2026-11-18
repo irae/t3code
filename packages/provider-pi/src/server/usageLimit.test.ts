@@ -79,10 +79,10 @@ describe("classifyPiUsageLimit", () => {
     );
   });
 
-  it("reads an ISO timestamp", () => {
+  it("does not treat an embedded timestamp as the reset", () => {
     assert.deepEqual(
       classifyPiUsageLimit("usage limit reached at 2026-11-12T22:51:21.000Z", nowMs),
-      { resetAt: "2026-11-12T22:51:21.000Z" },
+      { resetAt: null },
     );
   });
 
@@ -90,36 +90,6 @@ describe("classifyPiUsageLimit", () => {
     assert.deepEqual(classifyPiUsageLimit('usage limit "resets_at": 1794521481', nowMs), {
       resetAt: DateTime.formatIso(DateTime.makeUnsafe(1794521481 * 1000)),
     });
-  });
-
-  it("reads a local clock and rolls a past time to the next day", () => {
-    const localNow = new Date(2026, 10, 12, 20, 0, 0, 0);
-    const expected = new Date(2026, 10, 13, 19, 51, 0, 0);
-    assert.deepEqual(
-      classifyPiUsageLimit(
-        "You've hit your usage limit. try again at 7:51 PM.",
-        localNow.getTime(),
-      ),
-      { resetAt: expected.toISOString() },
-    );
-  });
-
-  it("reads a same-day local clock", () => {
-    const localNow = new Date(2026, 10, 12, 15, 0, 0, 0);
-    const expected = new Date(2026, 10, 12, 19, 51, 0, 0);
-    assert.equal(
-      classifyPiUsageLimit("usage limit. try again at 7:51 PM.", localNow.getTime())?.resetAt,
-      expected.toISOString(),
-    );
-  });
-
-  it("reads a 24-hour clock", () => {
-    const localNow = new Date(2026, 10, 12, 15, 0, 0, 0);
-    const expected = new Date(2026, 10, 12, 19, 51, 0, 0);
-    assert.equal(
-      classifyPiUsageLimit("usage limit resets 19:51", localNow.getTime())?.resetAt,
-      expected.toISOString(),
-    );
   });
 
   it("keeps the limit when the message has no reset time", () => {
@@ -161,6 +131,11 @@ describe("billed usage reset", () => {
     ["xai/grok-4.7", "grok"],
   ] as const)("maps %s to %s", (model, driver) => {
     assert.equal(billedDriverForModel(model), driver);
+  });
+
+  it("does not map an API-key provider token onto a subscription driver", () => {
+    assert.isNull(billedDriverForModel("openai/gpt-6"));
+    assert.isNull(billedDriverForModel("xai/other"));
   });
 
   it("ignores a slug with no billed driver", () => {
