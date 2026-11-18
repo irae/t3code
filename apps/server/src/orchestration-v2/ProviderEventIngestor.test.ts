@@ -16,6 +16,7 @@ import {
   type OrchestrationV2ProviderThread,
   type OrchestrationV2Run,
   type OrchestrationV2TurnItem,
+  type ServerProvider,
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderThreadId,
@@ -30,6 +31,7 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as Effect from "effect/Effect";
+import * as Ref from "effect/Ref";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -54,7 +56,6 @@ import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.
 import { UsageLimitResetFallback } from "../usage/UsageLimitSources.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
-import type { ServerProvider } from "@t3tools/contracts";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import {
   makeProviderEventRoutingState,
@@ -348,6 +349,137 @@ it.effect("takes a hub's reset for an unreset usage_limit, then refreshes the sn
           }),
       }),
     );
+  }),
+);
+
+it.effect("stamps a Pi usage limit from the billed driver's windows", () =>
+  Effect.gen(function* () {
+    type SessionWindow = {
+      id: string;
+      kind: "session";
+      label: string;
+      usedPercent: number;
+      resetsAt: string;
+    };
+    const windows = yield* Ref.make<ReadonlyArray<SessionWindow>>([]);
+    const nextWindows = yield* Ref.make<ReadonlyArray<SessionWindow>>([]);
+    let refreshes = 0;
+    const codex = {
+      instanceId: ProviderInstanceId.make("codex"),
+      driverKind: CODEX_DRIVER,
+      snapshot: {
+        getSnapshot: Ref.get(windows).pipe(
+          Effect.map(
+            (current) =>
+              ({
+                usageLimits: { checkedAt: "1970-01-01T00:00:00.000Z", windows: current },
+              }) as ServerProvider,
+          ),
+        ),
+        refreshUsage: Ref.get(nextWindows).pipe(
+          Effect.flatMap((next) => Ref.set(windows, next)),
+          Effect.tap(() =>
+            Effect.sync(() => {
+              refreshes += 1;
+            }),
+          ),
+        ),
+      },
+    } as ProviderInstance;
+    const instances = Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry)({
+      getInstance: () => Effect.succeed(undefined),
+      listInstances: Effect.succeed([codex]),
+    });
+    yield* Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const nowMs = DateTime.toEpochMillis(now);
+      const stale = DateTime.formatIso(DateTime.makeUnsafe(nowMs + 30 * 60_000));
+      const future = DateTime.formatIso(DateTime.makeUnsafe(nowMs + 2 * 60 * 60_000));
+      const session = (resetsAt: string, usedPercent: number) => [
+        {
+          id: "primary",
+          kind: "session" as const,
+          label: "Session",
+          usedPercent,
+          resetsAt,
+        },
+      ];
+      yield* Ref.set(windows, session(stale, 40));
+      yield* Ref.set(nextWindows, session(future, 100));
+      const eventSink = yield* EventSink.EventSinkV2;
+      const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const threadEvent = yield* threadCreatedEvent(now);
+      const threadId = threadEvent.threadId;
+      const runId = RunId.make("run:pi-limit");
+      const pi = ProviderDriverKind.make("pi");
+      yield* eventSink.write({
+        events: [
+          threadEvent,
+          {
+            id: yield* idAllocator.allocate.event({ threadId }),
+            type: "run.created",
+            threadId,
+            occurredAt: now,
+            payload: {
+              id: runId,
+              threadId,
+              ordinal: 1,
+              providerInstanceId: ProviderInstanceId.make("pi_matt"),
+              modelSelection: {
+                instanceId: ProviderInstanceId.make("pi_matt"),
+                model: "openai-codex/gpt-6.2-sol",
+              },
+              providerThreadId: null,
+              userMessageId: MessageId.make("message:pi-limit"),
+              rootNodeId: null,
+              activeAttemptId: null,
+              status: "running",
+              requestedAt: now,
+              startedAt: now,
+              completedAt: null,
+              checkpointId: null,
+              contextHandoffId: null,
+            },
+          },
+        ],
+      });
+      const stored = yield* ingestor.ingestNormalized({
+        providerSessionId: yield* idAllocator.allocate.providerSession({
+          providerInstanceId: ProviderInstanceId.make("pi_matt"),
+          threadId,
+        }),
+        providerInstanceId: ProviderInstanceId.make("pi_matt"),
+        threadId,
+        runId,
+        event: {
+          type: "turn.terminal",
+          driver: pi,
+          providerThreadId: idAllocator.derive.providerThread({
+            driver: pi,
+            nativeThreadId: "pi-limited",
+          }),
+          providerTurnId: idAllocator.derive.providerTurn({
+            driver: pi,
+            nativeTurnId: "pi-limited-turn",
+          }),
+          runOrdinal: 1,
+          failureItemOrdinal: 1,
+          status: "failed",
+          failure: makeProviderFailure({
+            class: "usage_limit",
+            message: "Codex error: The usage limit has been reached",
+          }),
+          threadDisposition: "reusable",
+        },
+      });
+      const item = stored.find((storedEvent) => storedEvent.event.type === "turn-item.updated");
+      if (item?.event.type !== "turn-item.updated" || item.event.payload.type !== "error") {
+        return yield* Effect.die("missing error item");
+      }
+      assert.equal(item.event.payload.failure.resetAt, future);
+      assert.equal(refreshes, 1);
+    }).pipe(Effect.provide(makeLayerTest(layerTestEventSink, instances)));
   }),
 );
 

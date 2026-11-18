@@ -8,6 +8,7 @@ import {
   type OrchestrationV2Subagent,
   type OrchestrationV2ThreadProjection,
   type ModelSelection,
+  type ServerProviderUsageWindow,
   ProviderInstanceId,
   ProviderSessionId,
   ProviderThreadId,
@@ -33,12 +34,17 @@ import {
 } from "../telemetry/ProviderUsageAnalytics.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
+import { windowLimitsModel } from "../provider/claudeUsageLimits.ts";
 import { UsageLimitResetFallback } from "../usage/UsageLimitSources.ts";
 import * as EventSink from "./EventSink.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { makeProviderFailureTurnItem } from "@t3tools/provider-core/server/failure";
+import {
+  billedDriverForModel,
+  resetAtFromBilledWindows,
+} from "@t3tools/provider-pi/server/usageLimit";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import { stripUnservedToolOutputImageBytes } from "./toolOutputImageBytes.ts";
 import { boundFileChangeForStorage } from "./WireProjection.ts";
@@ -260,6 +266,49 @@ export const layer: Layer.Layer<
     const usageLimitResets = yield* UsageLimitResetFallback;
     const scope = yield* Effect.scope;
     const completedTurnAnalytics = new Set<string>();
+
+    const readBilledWindows = Effect.fn("ProviderEventIngestor.readBilledWindows")(function* (
+      driver: string,
+    ) {
+      const windows: ServerProviderUsageWindow[] = [];
+      for (const instance of yield* instances.listInstances) {
+        if (instance.driverKind !== driver) continue;
+        const snapshot = yield* instance.snapshot.getSnapshot.pipe(
+          Effect.orElseSucceed(() => undefined),
+        );
+        if (snapshot?.usageLimits?.windows) windows.push(...snapshot.usageLimits.windows);
+      }
+      return windows;
+    });
+
+    const billedResetAt = Effect.fn("ProviderEventIngestor.billedResetAt")(function* (
+      model: string,
+    ) {
+      const driver = billedDriverForModel(model);
+      if (driver === null) return null;
+      const limiting = (windows: ReadonlyArray<ServerProviderUsageWindow>) =>
+        driver === "claudeAgent"
+          ? windows.filter((window) => windowLimitsModel(window, model))
+          : windows;
+      const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
+      const known = resetAtFromBilledWindows(limiting(yield* readBilledWindows(driver)), nowMs);
+      if (known !== null) return known;
+      const refreshers = (yield* instances.listInstances).flatMap((instance) =>
+        instance.driverKind === driver && instance.snapshot.refreshUsage
+          ? [instance.snapshot.refreshUsage]
+          : [],
+      );
+      if (refreshers.length === 0) return null;
+      yield* Effect.forEach(
+        refreshers,
+        (refresh) => refresh.pipe(Effect.timeout("20 seconds"), Effect.ignoreCause({ log: true })),
+        { concurrency: 3 },
+      );
+      return resetAtFromBilledWindows(
+        limiting(yield* readBilledWindows(driver)),
+        DateTime.toEpochMillis(yield* DateTime.now),
+      );
+    });
 
     const makeDomainEvent =
       /* This helper runs for individual orchestration events; the enclosing operation owns the span. */
@@ -731,7 +780,21 @@ export const layer: Layer.Layer<
                         usageLimitResets.resetAt(input.event.driver, endpoint, model),
                       ),
                     );
-              const failure = hubResetAt === null ? reported : { ...reported, resetAt: hubResetAt };
+              const billedReset =
+                hubResetAt === null &&
+                String(input.event.driver) === "pi" &&
+                reported.class === "usage_limit" &&
+                reported.resetAt == null &&
+                input.runId !== undefined
+                  ? yield* projections.getRun(input.threadId, input.runId).pipe(
+                      Effect.flatMap((run) =>
+                        run ? billedResetAt(run.modelSelection.model) : Effect.succeed(null),
+                      ),
+                      Effect.orElseSucceed(() => null),
+                    )
+                  : null;
+              const resetAt = hubResetAt ?? billedReset;
+              const failure = resetAt === null ? reported : { ...reported, resetAt };
               return [
                 ...dismissed,
                 yield* makeDomainEvent(input, {
