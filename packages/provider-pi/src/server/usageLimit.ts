@@ -4,32 +4,29 @@ import type {
   ServerProviderUsageWindow,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Option from "effect/Option";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 
-const USAGE_LIMIT_PATTERN =
-  /usage[_\s-]*limit|rate[_\s-]*limited|rate[_\s-]*limit|too many requests|insufficient[_\s-]*quota|quota exceeded|exceeded (?:your |the )?quota|out of quota|\bout of budget\b|\bout of extra usage\b|\bout of credits\b|insufficient credits|spend(?:ing)? limit|GoUsageLimitError|FreeUsageLimitError|subscription_sharing_(?:workplace_individual_)?usage_limit|usageLimitExceeded|rateLimitExceeded|usage_limit_reached|usage_not_included|rate_limit_exceeded|PRO_USER_USAGE_LIMIT|you['’]ve hit your (?:(?:5-hour|session|weekly|usage) )?limit|you['’]re out of extra usage|\b(?:5-hour|session|weekly) limit\b|available balance|"code"\s*:\s*"?1308(?![0-9])|(?<![A-Za-z0-9])429(?![A-Za-z0-9])(?!\s*(?:ms|milliseconds|bytes|kb|mb|tokens))/i;
-
-const RESETS_AT_UNIX = /resets_at["']?\s*[:=]\s*"?(\d{10,13})(?!\d)/i;
-
-const RESET_DURATION =
-  /(?:reset after|resets in|try again in|retry (?:after|in))\s*~?\s*(?:(\d+)\s*h(?:ours?|rs?)?)?\s*(?:(\d+)\s*m(?:in(?:ute)?s?)?)?\s*(?:(\d+)\s*s(?:ec(?:ond)?s?)?)?/i;
+import { parseUsageLimitMessage } from "./parseUsageLimitMessage.ts";
 
 const LATEST_RESET_WINDOW_MS = 120 * 24 * 60 * 60 * 1000;
 
 export function classifyPiUsageLimit(
   message: string,
   nowMs: number,
+  zone: DateTime.TimeZone = DateTime.zoneMakeLocal(),
 ): { readonly resetAt: string | null } | null {
-  if (!USAGE_LIMIT_PATTERN.test(message)) return null;
-  return { resetAt: resetAtFromMessage(message, nowMs) };
+  const candidates = parseUsageLimitMessage(message);
+  if (candidates === null) return null;
+  return { resetAt: resolveResetAt(candidates, nowMs, zone) };
 }
 
 export function failureForPiTerminalMessage(
   message: string,
   nowMs: number,
-  ordinary?: { readonly retryable?: boolean | null },
+  ordinary?: { readonly retryable?: boolean | null; readonly zone?: DateTime.TimeZone },
 ): OrchestrationV2ProviderFailure {
-  const limit = classifyPiUsageLimit(message, nowMs);
+  const limit = classifyPiUsageLimit(message, nowMs, ordinary?.zone);
   if (limit !== null) {
     return makeProviderFailure({
       message,
@@ -45,10 +42,49 @@ export function failureForPiTerminalMessage(
   });
 }
 
-function resetAtFromMessage(message: string, nowMs: number): string | null {
-  const candidate = unixReset(message) ?? durationReset(message, nowMs);
-  if (candidate === null || !acceptableReset(candidate, nowMs)) return null;
-  return DateTime.formatIso(DateTime.makeUnsafe(candidate));
+function resolveResetAt(
+  candidates: NonNullable<ReturnType<typeof parseUsageLimitMessage>>,
+  nowMs: number,
+  zone: DateTime.TimeZone,
+): string | null {
+  let latest = Number.NEGATIVE_INFINITY;
+  for (const candidate of candidates) {
+    let at: number;
+    switch (candidate.kind) {
+      case "epoch":
+        at = candidate.milliseconds;
+        break;
+      case "duration":
+        at = nowMs + candidate.milliseconds;
+        break;
+      case "zoned": {
+        const parsed = DateTime.make(candidate.timestamp);
+        if (Option.isNone(parsed)) continue;
+        at = DateTime.toEpochMillis(parsed.value);
+        break;
+      }
+      case "local": {
+        const date =
+          candidate.date ?? DateTime.toParts(DateTime.setZone(DateTime.makeUnsafe(nowMs), zone));
+        const placed = placeWallClock(
+          {
+            year: date.year,
+            month: date.month,
+            day: date.day,
+            hour: candidate.hour,
+            minute: candidate.minute,
+            second: candidate.second ?? 0,
+          },
+          zone,
+        );
+        if (placed === null) continue;
+        at = candidate.second === undefined ? placed + 60_000 : placed;
+        break;
+      }
+    }
+    if (acceptableReset(at, nowMs)) latest = Math.max(latest, at);
+  }
+  return Number.isFinite(latest) ? DateTime.formatIso(DateTime.makeUnsafe(latest)) : null;
 }
 
 function acceptableReset(resetMs: number, nowMs: number): boolean {
@@ -60,22 +96,28 @@ function acceptableReset(resetMs: number, nowMs: number): boolean {
   );
 }
 
-function unixReset(message: string): number | null {
-  const match = RESETS_AT_UNIX.exec(message);
-  if (match?.[1] === undefined) return null;
-  const raw = Number(match[1]);
-  if (!Number.isFinite(raw)) return null;
-  return raw >= 1e12 ? raw : raw * 1000;
-}
-
-function durationReset(message: string, nowMs: number): number | null {
-  const match = RESET_DURATION.exec(message);
-  if (match === null) return null;
-  const hours = Number(match[1] ?? 0);
-  const minutes = Number(match[2] ?? 0);
-  const seconds = Number(match[3] ?? 0);
-  if (hours + minutes + seconds <= 0) return null;
-  return nowMs + ((hours * 60 + minutes) * 60 + seconds) * 1000;
+// A repeated local hour takes the later instant so resume does not fire early. A gap is not a reset.
+function placeWallClock(
+  parts: {
+    readonly year: number;
+    readonly month: number;
+    readonly day: number;
+    readonly hour: number;
+    readonly minute: number;
+    readonly second: number;
+  },
+  zone: DateTime.TimeZone,
+): number | null {
+  const options = { timeZone: zone, adjustForTimeZone: true as const };
+  const unambiguous = DateTime.makeZoned(parts, { ...options, disambiguation: "reject" });
+  if (Option.isSome(unambiguous)) return DateTime.toEpochMillis(unambiguous.value);
+  const later = DateTime.makeZoned(parts, { ...options, disambiguation: "later" });
+  if (Option.isNone(later)) return null;
+  const placed = DateTime.toParts(later.value);
+  if (placed.hour !== parts.hour || placed.minute !== parts.minute || placed.day !== parts.day) {
+    return null;
+  }
+  return DateTime.toEpochMillis(later.value);
 }
 
 export function billedDriverForModel(model: string | null | undefined): ProviderDriverKind | null {
@@ -91,25 +133,27 @@ export function billedDriverForModel(model: string | null | undefined): Provider
   return null;
 }
 
-function futureResetMs(resetsAt: string | undefined, nowMs: number): number | null {
-  if (resetsAt === undefined) return null;
-  const at = Date.parse(resetsAt);
-  return Number.isFinite(at) && at > nowMs ? at : null;
+function readResetMs(resetsAt: string | undefined): number | null {
+  if (typeof resetsAt !== "string" || resetsAt.length === 0) return null;
+  const at = DateTime.make(resetsAt);
+  if (Option.isNone(at)) return null;
+  const ms = DateTime.toEpochMillis(at.value);
+  return Number.isFinite(ms) ? ms : null;
 }
 
-/** Every exhausted window must have reset. A past clock already did. */
+/** Every exhausted window must have a readable clock. A past clock already reset. */
 export function resetAtFromBilledWindows(
   windows: readonly Pick<ServerProviderUsageWindow, "usedPercent" | "resetsAt">[],
   nowMs: number,
 ): string | null {
   const exhausted = windows.filter((window) => window.usedPercent >= 100);
-  if (exhausted.length === 0 || exhausted.some((window) => window.resetsAt === undefined)) {
-    return null;
+  if (exhausted.length === 0) return null;
+  const future: number[] = [];
+  for (const window of exhausted) {
+    const at = readResetMs(window.resetsAt);
+    if (at === null) return null;
+    if (at > nowMs) future.push(at);
   }
-  const resets = exhausted.flatMap((window) => {
-    const resetsAt = window.resetsAt;
-    return futureResetMs(resetsAt, nowMs) === null || resetsAt === undefined ? [] : [resetsAt];
-  });
-  resets.sort((left, right) => Date.parse(left) - Date.parse(right));
-  return resets.at(-1) ?? null;
+  const latest = future.reduce((max, at) => Math.max(max, at), Number.NEGATIVE_INFINITY);
+  return Number.isFinite(latest) ? DateTime.formatIso(DateTime.makeUnsafe(latest)) : null;
 }

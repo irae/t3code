@@ -60,6 +60,14 @@ import { loadMcpBridge } from "./mcpBridge.testkit.ts";
 import { PI_T3_SERVICE_TIER_COMMAND } from "./mcpExtensionSource.ts";
 import { turnItemOutputText } from "../../../client-runtime/src/work-log/itemDetail.ts";
 
+const localTime = (hour: number) =>
+  DateTime.makeZonedUnsafe(
+    { year: 2026, month: 11, day: 19, hour },
+    { timeZone: DateTime.zoneMakeLocal(), adjustForTimeZone: true },
+  );
+const LOCAL_NOON_MS = DateTime.toEpochMillis(localTime(12));
+const LOCAL_FOUR_PM_ISO = DateTime.formatIso(localTime(16));
+
 const layerTest = Layer.mergeAll(
   NodeServices.layer,
   IdAllocator.layer,
@@ -4693,6 +4701,15 @@ describe("PiAdapterV2", () => {
             notice.turnItem.message === "Command finished\nwith details",
         );
       }
+      yield* fake.emit({
+        type: "extension_ui_request",
+        method: "notify",
+        notifyType: "warning",
+        message: "Subscription rate limit reached — resets at 4:00:00 PM",
+      });
+      yield* takeEvent(
+        (event) => event.type === "turn_item.updated" && event.turnItem.type === "system_notice",
+      );
       assert.equal(runtime.providerSession.status, "running");
       yield* fake.emit({ type: "response", command: "prompt", success: true, data });
       const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
@@ -4767,8 +4784,9 @@ describe("PiAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
-  it.effect("classifies a terminal Pi model error as a usage limit", () =>
+  it.effect("uses the latest reset from Pi warnings on a terminal usage limit", () =>
     Effect.gen(function* () {
+      yield* TestClock.setTime(LOCAL_NOON_MS);
       const fake = yield* makeFakePi;
       const { runtime, takeEvent } = yield* openRuntime(fake);
       const providerThread = yield* runtime.ensureThread({
@@ -4779,11 +4797,23 @@ describe("PiAdapterV2", () => {
       yield* startTurn(runtime, providerThread, "default", [], "Hello pi");
       yield* fake.takeRequest("prompt");
       yield* fake.emit({
+        type: "extension_ui_request",
+        method: "notify",
+        notifyType: "warning",
+        message: "Claude subscription rate limit reached (five_hour) — resets at 4:00:00 PM",
+      });
+      yield* fake.emit({
+        type: "extension_ui_request",
+        method: "notify",
+        notifyType: "warning",
+        message: "Subscription rate limit reached — resets at 3:00:00 PM",
+      });
+      yield* fake.emit({
         type: "message_end",
         message: {
           role: "assistant",
           stopReason: "error",
-          errorMessage: "You've hit your usage limit. Try again in ~15 min.",
+          errorMessage: "You've hit your usage limit.",
         },
       });
       yield* fake.emit({ type: "agent_settled" });
@@ -4797,8 +4827,7 @@ describe("PiAdapterV2", () => {
         return;
       }
       assert.equal(terminal.failure.class, "usage_limit");
-      const resetAt = terminal.failure.resetAt;
-      assert.isTrue(typeof resetAt === "string" && Number.isFinite(Date.parse(resetAt)));
+      assert.equal(terminal.failure.resetAt, LOCAL_FOUR_PM_ISO);
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 

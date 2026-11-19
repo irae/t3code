@@ -385,9 +385,9 @@ it.effect("stamps a Pi usage limit from the billed driver's windows", () =>
           ),
         ),
       },
-    } as ProviderInstance;
+    } as unknown as ProviderInstance;
     const instances = Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry)({
-      getInstance: () => Effect.succeed(undefined),
+      getInstance: () => Effect.undefined,
       listInstances: Effect.succeed([codex]),
     });
     yield* Effect.gen(function* () {

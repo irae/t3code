@@ -8,7 +8,6 @@ import {
   type OrchestrationV2Subagent,
   type OrchestrationV2ThreadProjection,
   type ModelSelection,
-  type ServerProviderUsageWindow,
   ProviderInstanceId,
   ProviderSessionId,
   ProviderThreadId,
@@ -267,47 +266,31 @@ export const layer: Layer.Layer<
     const scope = yield* Effect.scope;
     const completedTurnAnalytics = new Set<string>();
 
-    const readBilledWindows = Effect.fn("ProviderEventIngestor.readBilledWindows")(function* (
-      driver: string,
-    ) {
-      const windows: ServerProviderUsageWindow[] = [];
-      for (const instance of yield* instances.listInstances) {
-        if (instance.driverKind !== driver) continue;
-        const snapshot = yield* instance.snapshot.getSnapshot.pipe(
-          Effect.orElseSucceed(() => undefined),
-        );
-        if (snapshot?.usageLimits?.windows) windows.push(...snapshot.usageLimits.windows);
-      }
-      return windows;
-    });
-
     const billedResetAt = Effect.fn("ProviderEventIngestor.billedResetAt")(function* (
       model: string,
     ) {
       const driver = billedDriverForModel(model);
       if (driver === null) return null;
-      const limiting = (windows: ReadonlyArray<ServerProviderUsageWindow>) =>
-        driver === "claudeAgent"
-          ? windows.filter((window) => windowLimitsModel(window, model))
-          : windows;
-      const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
-      const known = resetAtFromBilledWindows(limiting(yield* readBilledWindows(driver)), nowMs);
-      if (known !== null) return known;
-      const refreshers = (yield* instances.listInstances).flatMap((instance) =>
-        instance.driverKind === driver && instance.snapshot.refreshUsage
-          ? [instance.snapshot.refreshUsage]
-          : [],
+      const matches = (yield* instances.listInstances).filter((item) => item.driverKind === driver);
+      const instance = matches.length === 1 ? matches[0] : undefined;
+      if (!instance) return null;
+      const readReset = Effect.gen(function* () {
+        const snapshot = yield* instance.snapshot.getSnapshot.pipe(
+          Effect.orElseSucceed(() => undefined),
+        );
+        const windows = snapshot?.usageLimits?.windows ?? [];
+        return resetAtFromBilledWindows(
+          windows.filter((window) => windowLimitsModel(window, model)),
+          DateTime.toEpochMillis(yield* DateTime.now),
+        );
+      });
+      const known = yield* readReset;
+      if (known !== null || !instance.snapshot.refreshUsage) return known;
+      yield* instance.snapshot.refreshUsage.pipe(
+        Effect.timeout("5 seconds"),
+        Effect.ignoreCause({ log: true }),
       );
-      if (refreshers.length === 0) return null;
-      yield* Effect.forEach(
-        refreshers,
-        (refresh) => refresh.pipe(Effect.timeout("20 seconds"), Effect.ignoreCause({ log: true })),
-        { concurrency: 3 },
-      );
-      return resetAtFromBilledWindows(
-        limiting(yield* readBilledWindows(driver)),
-        DateTime.toEpochMillis(yield* DateTime.now),
-      );
+      return yield* readReset;
     });
 
     const makeDomainEvent =
