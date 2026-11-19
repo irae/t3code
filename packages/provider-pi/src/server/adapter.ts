@@ -62,7 +62,7 @@ import {
   makeProviderFailure,
   makeProviderRetryTurnItem,
 } from "@t3tools/provider-core/server/failure";
-import { failureForPiTerminalMessage } from "./usageLimit.ts";
+import { classifyPiUsageLimit, failureForPiTerminalMessage } from "./usageLimit.ts";
 import { turnScopedSelectionTransition } from "@t3tools/provider-core/server/selectionTransition";
 import {
   findReportedPiModel,
@@ -361,6 +361,7 @@ function compactionTitle(status: PiCompactionStatus): string {
 }
 
 interface ActivePiTurn {
+  notifiedUsageResetAt?: string;
   readonly turnInput: ProviderAdapter.ProviderAdapterV2TurnInput;
   readonly providerTurn: OrchestrationV2ProviderTurn;
   readonly startedAt: DateTime.Utc;
@@ -1788,6 +1789,13 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           const message = recordString(event, "message") ?? "";
           if (turn === null || message.length === 0) return;
           const notifyType = recordString(event, "notifyType");
+          if (notifyType === "warning" || notifyType === "error") {
+            const now = yield* DateTime.now;
+            const resetAt = classifyPiUsageLimit(message, DateTime.toEpochMillis(now))?.resetAt;
+            if (resetAt && (!turn.notifiedUsageResetAt || resetAt > turn.notifiedUsageResetAt)) {
+              turn.notifiedUsageResetAt = resetAt;
+            }
+          }
           yield* emitSystemNotice(
             turn,
             `notify:${turn.providerTurn.id}:${turn.nextItemOrdinal}`,
@@ -2075,7 +2083,15 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         const tokenUsage = readUsage
           ? yield* readTokenUsage(turn.latestCompactionAfterTokens, completedAt)
           : undefined;
-        const failure = interrupted ? null : (turn.rejectedPromptFailure ?? turn.failure);
+        const terminalFailure = interrupted ? null : (turn.rejectedPromptFailure ?? turn.failure);
+        const notifiedResetAt = turn.notifiedUsageResetAt;
+        const failure =
+          terminalFailure?.class === "usage_limit" &&
+          terminalFailure.resetAt == null &&
+          notifiedResetAt !== undefined &&
+          Date.parse(notifiedResetAt) > DateTime.toEpochMillis(completedAt)
+            ? { ...terminalFailure, resetAt: notifiedResetAt }
+            : terminalFailure;
         yield* emit({
           type: "provider_turn.updated",
           driver: PI_PROVIDER,

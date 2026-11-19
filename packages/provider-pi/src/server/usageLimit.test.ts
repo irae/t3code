@@ -79,17 +79,118 @@ describe("classifyPiUsageLimit", () => {
     );
   });
 
-  it("does not treat an embedded timestamp as the reset", () => {
+  it("reads a zoned reset without moving it into the system zone", () => {
+    const dhaka = DateTime.zoneMakeNamedUnsafe("Asia/Dhaka");
+    assert.equal(
+      classifyPiUsageLimit("usage limit resets at 2026-11-12 19:51:21 -03:00", nowMs, dhaka)
+        ?.resetAt,
+      "2026-11-12T22:51:21.000Z",
+    );
+  });
+
+  it("places an unzoned reset in the given zone, not UTC", () => {
+    const dhaka = DateTime.zoneMakeNamedUnsafe("Asia/Dhaka");
+    assert.equal(
+      classifyPiUsageLimit("usage limit resets at 2026-11-13 04:00:00", nowMs, dhaka)?.resetAt,
+      "2026-11-12T22:00:00.000Z",
+    );
+  });
+
+  it("does not treat a reached-at timestamp as the reset", () => {
+    assert.deepEqual(
+      classifyPiUsageLimit(
+        "usage limit reached at 2026-11-12T20:00:00.000Z. Resets at 2026-11-12T22:51:21.000Z",
+        nowMs,
+      ),
+      { resetAt: "2026-11-12T22:51:21.000Z" },
+    );
     assert.deepEqual(
       classifyPiUsageLimit("usage limit reached at 2026-11-12T22:51:21.000Z", nowMs),
       { resetAt: null },
     );
   });
 
-  it("reads resets_at seconds", () => {
-    assert.deepEqual(classifyPiUsageLimit('usage limit "resets_at": 1794521481', nowMs), {
-      resetAt: DateTime.formatIso(DateTime.makeUnsafe(1794521481 * 1000)),
+  it.each(["4:00:00 PM", "16:00:00"])("reads local clock %s", (clock) => {
+    const localNow = new Date(2026, 10, 19, 12);
+    assert.deepEqual(
+      classifyPiUsageLimit(
+        `Claude subscription rate limit reached (five_hour) — resets at ${clock}`,
+        localNow.getTime(),
+      ),
+      { resetAt: new Date(2026, 10, 19, 16).toISOString() },
+    );
+  });
+
+  it("treats a minute-precision clock as the next minute", () => {
+    const localNow = new Date(2026, 10, 19, 12);
+    assert.deepEqual(
+      classifyPiUsageLimit(
+        "Claude subscription rate limit reached (five_hour) — resets at 16:00",
+        localNow.getTime(),
+      ),
+      { resetAt: new Date(2026, 10, 19, 16, 1).toISOString() },
+    );
+  });
+
+  it("does not invent tomorrow when the clock has already passed", () => {
+    const localNow = new Date(2026, 10, 19, 18);
+    assert.deepEqual(classifyPiUsageLimit("usage limit resets at 4:00:00 PM", localNow.getTime()), {
+      resetAt: null,
     });
+  });
+
+  it("reads a dated clock in the given zone and leaves a past date unknown", () => {
+    const dhaka = DateTime.zoneMakeNamedUnsafe("Asia/Dhaka");
+    const before = Date.UTC(2026, 10, 7, 3, 0, 0);
+    assert.equal(
+      classifyPiUsageLimit("You've hit your usage limit. Try again at 3:37 PM.", before, dhaka)
+        ?.resetAt,
+      "2026-11-07T09:38:00.000Z",
+    );
+    assert.equal(
+      classifyPiUsageLimit(
+        "You've hit your usage limit. Try again at Nov 11th, 2026 3:37 PM.",
+        before,
+        dhaka,
+      )?.resetAt,
+      "2026-11-11T09:38:00.000Z",
+    );
+    assert.equal(
+      classifyPiUsageLimit("usage limit. Try again at Nov 11th, 2026 3:37 PM.", nowMs, dhaka)
+        ?.resetAt,
+      null,
+    );
+  });
+
+  it("takes the later instant of a repeated local hour and rejects a missing one", () => {
+    const newYork = DateTime.zoneMakeNamedUnsafe("America/New_York");
+    for (const now of [Date.UTC(2026, 10, 1, 5, 15, 0), Date.UTC(2026, 10, 1, 6, 15, 0)]) {
+      assert.equal(
+        classifyPiUsageLimit("usage limit. Try again at 1:30 AM.", now, newYork)?.resetAt,
+        "2026-11-01T06:31:00.000Z",
+      );
+    }
+    assert.equal(
+      classifyPiUsageLimit("usage limit resets at 2:30 AM.", Date.UTC(2026, 2, 8, 6, 0, 0), newYork)
+        ?.resetAt,
+      null,
+    );
+  });
+
+  it("skips a stale absolute reset in favor of a valid wait", () => {
+    assert.deepEqual(
+      classifyPiUsageLimit("usage limit resets_at: 1000000000; retry in 1m", nowMs),
+      {
+        resetAt: new Date(nowMs + 60_000).toISOString(),
+      },
+    );
+  });
+
+  it.each(["resets_at", "reset_at", "resetAt"])("reads %s seconds", (key) => {
+    assert.equal(
+      classifyPiUsageLimit(`usage limit "${key}": 1794521481`, nowMs)?.resetAt,
+      DateTime.formatIso(DateTime.makeUnsafe(1794521481 * 1000)),
+    );
   });
 
   it("keeps the limit when the message has no reset time", () => {
@@ -100,6 +201,17 @@ describe("classifyPiUsageLimit", () => {
       },
     );
   });
+});
+
+it("leaves trailing calendar dates to the usage-window fallback", () => {
+  assert.deepEqual(
+    classifyPiUsageLimit(
+      "You've hit your usage limit. Try again at 1:36 PM. Weekly limit resets 17:41 on 1 Jul",
+      Date.parse("2026-06-05T10:00:00Z"),
+      DateTime.zoneMakeOffset(0),
+    ),
+    { resetAt: null },
+  );
 });
 
 describe("failureForPiTerminalMessage", () => {
@@ -130,7 +242,7 @@ describe("billed usage reset", () => {
     ["claude-extra/claude-sonnet-5-5", "claudeAgent"],
     ["xai/grok-4.7", "grok"],
   ] as const)("maps %s to %s", (model, driver) => {
-    assert.equal(billedDriverForModel(model), driver);
+    assert.equal(String(billedDriverForModel(model)), driver);
   });
 
   it("does not map an API-key provider token onto a subscription driver", () => {
@@ -147,8 +259,8 @@ describe("billed usage reset", () => {
     assert.equal(
       resetAtFromBilledWindows(
         [
-          { kind: "session", usedPercent: 100, resetsAt: "2026-11-18T22:00:00.000Z" },
-          { kind: "weekly", usedPercent: 12, resetsAt: "2026-11-25T00:00:00.000Z" },
+          { usedPercent: 100, resetsAt: "2026-11-18T22:00:00.000Z" },
+          { usedPercent: 12, resetsAt: "2026-11-25T00:00:00.000Z" },
         ],
         billedNow,
       ),
@@ -160,8 +272,8 @@ describe("billed usage reset", () => {
     assert.isNull(
       resetAtFromBilledWindows(
         [
-          { kind: "session", usedPercent: 40, resetsAt: "2026-11-18T22:00:00.000Z" },
-          { kind: "weekly", usedPercent: 12, resetsAt: "2026-11-25T00:00:00.000Z" },
+          { usedPercent: 40, resetsAt: "2026-11-18T22:00:00.000Z" },
+          { usedPercent: 12, resetsAt: "2026-11-25T00:00:00.000Z" },
         ],
         billedNow,
       ),
@@ -171,10 +283,7 @@ describe("billed usage reset", () => {
   it("returns nothing when an exhausted window has no clock", () => {
     assert.isNull(
       resetAtFromBilledWindows(
-        [
-          { kind: "weekly", usedPercent: 100 },
-          { kind: "session", usedPercent: 100, resetsAt: "2026-11-18T22:00:00.000Z" },
-        ],
+        [{ usedPercent: 100 }, { usedPercent: 100, resetsAt: "2026-11-18T22:00:00.000Z" }],
         billedNow,
       ),
     );
@@ -183,7 +292,32 @@ describe("billed usage reset", () => {
   it("ignores a clock that already passed", () => {
     assert.isNull(
       resetAtFromBilledWindows(
-        [{ kind: "session", usedPercent: 100, resetsAt: "2026-11-18T19:00:00.000Z" }],
+        [{ usedPercent: 100, resetsAt: "2026-11-18T19:00:00.000Z" }],
+        billedNow,
+      ),
+    );
+  });
+
+  it("keeps a later exhausted window after another clock already passed", () => {
+    assert.equal(
+      resetAtFromBilledWindows(
+        [
+          { usedPercent: 100, resetsAt: "2026-11-18T19:00:00.000Z" },
+          { usedPercent: 100, resetsAt: "2026-11-18T22:00:00.000Z" },
+        ],
+        billedNow,
+      ),
+      "2026-11-18T22:00:00.000Z",
+    );
+  });
+
+  it("does not guess from a sibling when an exhausted window has no readable clock", () => {
+    assert.isNull(
+      resetAtFromBilledWindows(
+        [
+          { usedPercent: 100, resetsAt: "not-a-time" },
+          { usedPercent: 100, resetsAt: "2026-11-18T22:00:00.000Z" },
+        ],
         billedNow,
       ),
     );
@@ -192,7 +326,7 @@ describe("billed usage reset", () => {
   it("does not guess an open weekly clock", () => {
     assert.isNull(
       resetAtFromBilledWindows(
-        [{ kind: "weekly", usedPercent: 12, resetsAt: "2026-11-25T00:00:00.000Z" }],
+        [{ usedPercent: 12, resetsAt: "2026-11-25T00:00:00.000Z" }],
         billedNow,
       ),
     );
