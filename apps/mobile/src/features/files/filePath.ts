@@ -108,7 +108,7 @@ export function isSvgImagePreviewFile(path: string): boolean {
 }
 
 export function isMarkdownPreviewFile(path: string): boolean {
-  return /\.(?:md|mdx|markdown|mdown|mkd)$/i.test(path);
+  return /\.(?:md|mdc|mdx|markdown|mdown|mkd)$/i.test(path);
 }
 
 export function needsWorkspaceFileContents(input: {

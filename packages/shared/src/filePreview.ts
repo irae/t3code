@@ -67,7 +67,7 @@ export function filePreviewKind(
   if (generic) {
     if (extension === ".pdf") return "pdf";
     if (/^\.html?$/.test(extension)) return "html";
-    if (/^\.(md|markdown|mdown|mkd|mdx)$/.test(extension)) return "markdown";
+    if (/^\.(md|markdown|mdc|mdown|mkd|mdx)$/.test(extension)) return "markdown";
     if (richDocuments && /^\.(mmd|mermaid)$/.test(extension)) return "mermaid";
     if (richDocuments && isWorkspaceFontPreviewPath(name)) return "font";
     if (richDocuments && extension === ".rtf") return "text";

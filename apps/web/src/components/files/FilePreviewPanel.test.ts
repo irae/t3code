@@ -82,8 +82,10 @@ describe("file comment annotations", () => {
 });
 
 describe("isMarkdownPreviewFile", () => {
-  it("recognizes markdown and MDX files case-insensitively", () => {
+  it("recognizes markdown, MDC, and MDX files case-insensitively", () => {
     expect(isMarkdownPreviewFile("README.md")).toBe(true);
+    expect(isMarkdownPreviewFile(".cursor/rules/guide.mdc")).toBe(true);
+    expect(isMarkdownPreviewFile(".cursor/rules/guide.MDC")).toBe(true);
     expect(isMarkdownPreviewFile("docs/guide.MDX")).toBe(true);
     expect(isMarkdownPreviewFile("docs/guide.MARKDOWN")).toBe(true);
     expect(isMarkdownPreviewFile("docs/guide.mdown")).toBe(true);
