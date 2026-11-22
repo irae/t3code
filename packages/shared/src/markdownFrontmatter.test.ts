@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   formatFrontmatterYamlCodeBlock,
+  formatMarkdownWithFrontmatterCodeBlock,
   maskMarkdownFrontmatter,
   splitMarkdownFrontmatter,
 } from "./markdownFrontmatter.ts";
@@ -63,5 +64,26 @@ describe("splitMarkdownFrontmatter", () => {
     expect(formatFrontmatterYamlCodeBlock("description: use ```ts fences")).toBe(
       "````yaml\ndescription: use ```ts fences\n````",
     );
+  });
+
+  it("reformats leading frontmatter into one markdown string with exact source offsetDelta", () => {
+    const markdown =
+      "---\r\ndescription: Rule\r\nalwaysApply: false\r\n---\r\n# Rule\n- [ ] item\n";
+    const formatted = formatMarkdownWithFrontmatterCodeBlock(markdown);
+
+    expect(formatted.text).toBe(
+      "```yaml\ndescription: Rule\r\nalwaysApply: false\n```\n\n# Rule\n- [ ] item\n",
+    );
+    expect(formatted.text.indexOf("[ ]") + formatted.offsetDelta).toBe(markdown.indexOf("[ ]"));
+
+    const emptyHeader = "---\n---\n- [ ] item\n";
+    const emptyFormatted = formatMarkdownWithFrontmatterCodeBlock(emptyHeader);
+    expect(emptyFormatted.text).toBe("- [ ] item\n");
+    expect(emptyFormatted.text.indexOf("[ ]") + emptyFormatted.offsetDelta).toBe(
+      emptyHeader.indexOf("[ ]"),
+    );
+
+    const headerOnly = "---\na: 1\n---";
+    expect(formatMarkdownWithFrontmatterCodeBlock(headerOnly).text).toBe("```yaml\na: 1\n```");
   });
 });

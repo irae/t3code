@@ -2,10 +2,7 @@ import type { ScopedThreadRef } from "@t3tools/contracts";
 
 import ChatMarkdown from "~/components/ChatMarkdown";
 import { resolvePathLinkTarget } from "@t3tools/shared/fileLinks";
-import {
-  formatFrontmatterYamlCodeBlock,
-  splitMarkdownFrontmatter,
-} from "@t3tools/shared/markdownFrontmatter";
+import { formatMarkdownWithFrontmatterCodeBlock } from "@t3tools/shared/markdownFrontmatter";
 
 export function FileMarkdownPreview(props: {
   readonly cwd: string;
@@ -25,32 +22,24 @@ export function FileMarkdownPreview(props: {
     lastSeparator >= 0
       ? resolvePathLinkTarget(props.relativePath.slice(0, lastSeparator), props.cwd)
       : props.cwd;
-  const { frontmatter, body, bodyOffset } = splitMarkdownFrontmatter(props.text);
+  const { text, bodyOffset, offsetDelta } = formatMarkdownWithFrontmatterCodeBlock(props.text);
   const onTaskListChange = props.onTaskListChange
-    ? ({ markerOffset, checked }: { readonly markerOffset: number; readonly checked: boolean }) =>
-        props.onTaskListChange?.({ markerOffset: markerOffset + bodyOffset, checked })
+    ? ({ markerOffset, checked }: { readonly markerOffset: number; readonly checked: boolean }) => {
+        const sourceOffset = markerOffset + offsetDelta;
+        if (sourceOffset < bodyOffset) return;
+        props.onTaskListChange?.({ markerOffset: sourceOffset, checked });
+      }
     : undefined;
 
   return (
-    <div className="mx-auto max-w-4xl px-6 py-5">
-      {frontmatter ? (
-        <ChatMarkdown
-          text={formatFrontmatterYamlCodeBlock(frontmatter)}
-          cwd={props.cwd}
-          imageBaseDir={imageBaseDir}
-          threadRef={props.threadRef}
-          workspaceMutationId={props.workspaceMutationId}
-          className="mb-4"
-        />
-      ) : null}
-      <ChatMarkdown
-        text={body}
-        cwd={props.cwd}
-        imageBaseDir={imageBaseDir}
-        threadRef={props.threadRef}
-        workspaceMutationId={props.workspaceMutationId}
-        onTaskListChange={onTaskListChange}
-      />
-    </div>
+    <ChatMarkdown
+      text={text}
+      cwd={props.cwd}
+      imageBaseDir={imageBaseDir}
+      threadRef={props.threadRef}
+      workspaceMutationId={props.workspaceMutationId}
+      className="mx-auto max-w-4xl px-6 py-5"
+      onTaskListChange={onTaskListChange}
+    />
   );
 }
