@@ -70,6 +70,8 @@ describe("workspace preview classifiers", () => {
       "docs/draft#1.md",
       "docs/draft?1.md",
       "docs#old/draft.md",
+      ".cursor/rules/style.mdc",
+      "docs/draft#1.MDC",
       "CHANGELOG.markdown",
       "notes.MDOWN",
       "todo.mkd",
