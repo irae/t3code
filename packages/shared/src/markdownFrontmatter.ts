@@ -1,5 +1,5 @@
 const LEADING_FRONTMATTER =
-  /^\uFEFF?---[ \t]*(?:\r\n|\r|\n)(?:[\s\S]*?(?:\r\n|\r|\n))?(?:---|\.\.\.)[ \t]*(?=\r\n|\r|\n|$)/;
+  /^\uFEFF?---[ \t]*(?:\r\n|\r|\n)(?:([\s\S]*?)(?:\r\n|\r|\n))?(?:---|\.\.\.)[ \t]*(?=\r\n|\r|\n|$)/;
 
 /**
  * Blanks a leading YAML frontmatter block so rendered previews skip it instead
@@ -8,4 +8,24 @@ const LEADING_FRONTMATTER =
  */
 export function maskMarkdownFrontmatter(markdown: string): string {
   return markdown.replace(LEADING_FRONTMATTER, (block) => block.replace(/[^\r\n]/g, " "));
+}
+
+/**
+ * Extracts the raw YAML text inside a leading frontmatter block, or null when
+ * the document has no non-empty frontmatter.
+ */
+export function extractMarkdownFrontmatter(markdown: string): string | null {
+  const match = LEADING_FRONTMATTER.exec(markdown);
+  const raw = match?.[1]?.trim();
+  return raw ? raw : null;
+}
+
+/** Wraps raw YAML in a fenced code block using enough backticks to avoid collisions. */
+export function formatFrontmatterYamlCodeBlock(yaml: string): string {
+  const longestBacktickRun = Math.max(
+    2,
+    ...[...yaml.matchAll(/`+/g)].map((match) => match[0].length),
+  );
+  const fence = "`".repeat(longestBacktickRun + 1);
+  return `${fence}yaml\n${yaml}\n${fence}`;
 }
