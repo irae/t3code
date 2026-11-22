@@ -171,6 +171,8 @@ describe("attachment preview classification", () => {
     ["example.json", "application/octet-stream", "text"],
     ["report.pdf", "application/pdf", "pdf"],
     ["page.HTML", "", "html"],
+    ["rules.mdc", "", "markdown"],
+    ["rules.MDC", "text/plain", "markdown"],
     ["diagram.mmd", "", "mermaid"],
     ["diagram.MERMAID", "text/plain", "mermaid"],
     ["download", "text/vnd.mermaid", "mermaid"],
