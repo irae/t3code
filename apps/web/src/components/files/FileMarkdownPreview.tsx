@@ -3,9 +3,8 @@ import type { ScopedThreadRef } from "@t3tools/contracts";
 import ChatMarkdown from "~/components/ChatMarkdown";
 import { resolvePathLinkTarget } from "@t3tools/shared/fileLinks";
 import {
-  extractMarkdownFrontmatter,
   formatFrontmatterYamlCodeBlock,
-  maskMarkdownFrontmatter,
+  splitMarkdownFrontmatter,
 } from "@t3tools/shared/markdownFrontmatter";
 
 export function FileMarkdownPreview(props: {
@@ -26,13 +25,17 @@ export function FileMarkdownPreview(props: {
     lastSeparator >= 0
       ? resolvePathLinkTarget(props.relativePath.slice(0, lastSeparator), props.cwd)
       : props.cwd;
-  const frontmatterYaml = extractMarkdownFrontmatter(props.text);
+  const { frontmatter, body, bodyOffset } = splitMarkdownFrontmatter(props.text);
+  const onTaskListChange = props.onTaskListChange
+    ? ({ markerOffset, checked }: { readonly markerOffset: number; readonly checked: boolean }) =>
+        props.onTaskListChange?.({ markerOffset: markerOffset + bodyOffset, checked })
+    : undefined;
 
   return (
     <div className="mx-auto max-w-4xl px-6 py-5">
-      {frontmatterYaml ? (
+      {frontmatter ? (
         <ChatMarkdown
-          text={formatFrontmatterYamlCodeBlock(frontmatterYaml)}
+          text={formatFrontmatterYamlCodeBlock(frontmatter)}
           cwd={props.cwd}
           imageBaseDir={imageBaseDir}
           threadRef={props.threadRef}
@@ -41,12 +44,12 @@ export function FileMarkdownPreview(props: {
         />
       ) : null}
       <ChatMarkdown
-        text={maskMarkdownFrontmatter(props.text)}
+        text={body}
         cwd={props.cwd}
         imageBaseDir={imageBaseDir}
         threadRef={props.threadRef}
         workspaceMutationId={props.workspaceMutationId}
-        onTaskListChange={props.onTaskListChange}
+        onTaskListChange={onTaskListChange}
       />
     </div>
   );

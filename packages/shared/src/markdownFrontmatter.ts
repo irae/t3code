@@ -1,6 +1,17 @@
 const LEADING_FRONTMATTER =
   /^\uFEFF?---[ \t]*(?:\r\n|\r|\n)(?:([\s\S]*?)(?:\r\n|\r|\n))?(?:---|\.\.\.)[ \t]*(?=\r\n|\r|\n|$)/;
 
+const LEADING_NEWLINE = /^(?:\r\n|\r|\n)/;
+
+export interface SplitMarkdownFrontmatter {
+  /** Trimmed raw YAML inside the leading frontmatter block, or null when absent/empty. */
+  readonly frontmatter: string | null;
+  /** Document text after the leading frontmatter block (and its closing line break). */
+  readonly body: string;
+  /** UTF-16 offset of `body` within the original `markdown` string (for source-offset edits). */
+  readonly bodyOffset: number;
+}
+
 /**
  * Blanks a leading YAML frontmatter block so rendered previews skip it instead
  * of showing a rule and a setext heading. Masked characters become spaces and
@@ -11,13 +22,23 @@ export function maskMarkdownFrontmatter(markdown: string): string {
 }
 
 /**
- * Extracts the raw YAML text inside a leading frontmatter block, or null when
- * the document has no non-empty frontmatter.
+ * Splits a leading YAML frontmatter block from the document body in a single
+ * pass, returning `bodyOffset` so callers can map body offsets back to source.
  */
-export function extractMarkdownFrontmatter(markdown: string): string | null {
+export function splitMarkdownFrontmatter(markdown: string): SplitMarkdownFrontmatter {
   const match = LEADING_FRONTMATTER.exec(markdown);
-  const raw = match?.[1]?.trim();
-  return raw ? raw : null;
+  if (!match) {
+    return { frontmatter: null, body: markdown, bodyOffset: 0 };
+  }
+  const afterFence = match[0].length;
+  const trailingNewline = LEADING_NEWLINE.exec(markdown.slice(afterFence))?.[0].length ?? 0;
+  const bodyOffset = afterFence + trailingNewline;
+  const raw = match[1]?.trim();
+  return {
+    frontmatter: raw ? raw : null,
+    body: markdown.slice(bodyOffset),
+    bodyOffset,
+  };
 }
 
 /** Wraps raw YAML in a fenced code block using enough backticks to avoid collisions. */
